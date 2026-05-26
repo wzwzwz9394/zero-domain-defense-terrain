@@ -1303,6 +1303,10 @@ const STORAGE_KEYS = {
 const LEADERBOARD_LIMIT = 10;
 const SPEED_LEVELS = [0.5, 0.8, 1, 1.5, 2, 3, 4];
 const EARLY_WAVE_DELAY = 6;
+const INITIAL_WAVE_DELAY = 22;
+const AUTO_WAVE_DELAY = 12;
+const ENDLESS_AUTO_WAVE_MIN_DELAY = 6;
+const ENDLESS_STAGE_SIZE = 6;
 
 const TERRAIN_TYPES = {
   high: {
@@ -1640,6 +1644,8 @@ const state = {
   spawnQueue: [],
   spawnTimer: 0,
   waveCallTimer: 0,
+  prepTimer: 0,
+  prepTimerActive: false,
   enemies: [],
   towers: [],
   projectiles: [],
@@ -1845,13 +1851,34 @@ function nextWaveDefinition() {
   return waveDefinitionFor(state.wave + 1);
 }
 
+function endlessStageIndex(number) {
+  return Math.max(0, Math.floor((number - 1) / ENDLESS_STAGE_SIZE));
+}
+
+function endlessScalingForWave(number) {
+  const stage = endlessStageIndex(number);
+  const cycle = Math.floor((number - 1) / Math.max(1, currentWaves().length || WAVES.length));
+  return {
+    stage,
+    hp: 1 + stage * 0.2 + cycle * 0.06,
+    speed: Math.min(1.55, 1 + stage * 0.045),
+    count: 1 + stage * 0.1 + cycle * 0.14,
+    gap: Math.max(0.42, 1 - stage * 0.035 - cycle * 0.04),
+  };
+}
+
+function endlessStageLabel(number) {
+  return `阶段 ${endlessStageIndex(number) + 1}`;
+}
+
 function endlessWaveDefinition(number) {
   const baseWaves = currentWaves().length ? currentWaves() : WAVES;
   const base = baseWaves[(number - 1) % baseWaves.length];
   const cycle = Math.floor((number - 1) / baseWaves.length);
-  const stage = Math.floor((number - 1) / 5);
-  const countMultiplier = 1 + cycle * 0.2 + stage * 0.045;
-  const gapMultiplier = Math.max(0.52, 1 - cycle * 0.045);
+  const scaling = endlessScalingForWave(number);
+  const stage = scaling.stage;
+  const countMultiplier = scaling.count;
+  const gapMultiplier = scaling.gap;
   const packs = base.packs.map((pack, index) => ({
     type: pack.type,
     count: Math.ceil(pack.count * countMultiplier),
@@ -1859,11 +1886,36 @@ function endlessWaveDefinition(number) {
     entry: resolveEntryIndex(pack.entry + cycle + index),
   }));
 
+  if (stage >= 1 && number % 3 === 0) {
+    packs.push({
+      type: "fast",
+      count: 5 + stage * 2,
+      gap: Math.max(0.24, 0.48 - stage * 0.015),
+      entry: resolveEntryIndex(number + stage),
+    });
+  }
+  if (stage >= 2 && number % 4 === 0) {
+    packs.push({
+      type: "armor",
+      count: 3 + stage,
+      gap: Math.max(0.28, 0.68 - stage * 0.02),
+      entry: resolveEntryIndex(number / 2 + stage),
+    });
+  }
+  if (stage >= 3 && number % 6 === 0) {
+    packs.push({
+      type: "split",
+      count: 4 + stage,
+      gap: 0.48,
+      entry: resolveEntryIndex(number / 3 + stage),
+    });
+  }
+
   if (number % 5 === 0) {
     packs.push({
       type: number % 10 === 0 ? "boss" : "armor",
-      count: number % 10 === 0 ? 1 + Math.floor(number / 40) : 4 + Math.floor(number / 5),
-      gap: number % 10 === 0 ? 0.95 : 0.62,
+      count: number % 10 === 0 ? 1 + Math.floor(number / 36) + Math.floor(stage / 4) : 4 + Math.floor(number / 5) + stage,
+      gap: number % 10 === 0 ? 0.9 : Math.max(0.34, 0.62 - stage * 0.018),
       entry: resolveEntryIndex(number / 5),
     });
   }
@@ -1877,8 +1929,10 @@ function endlessWaveDefinition(number) {
   }
 
   return {
-    name: `${base.name} / 无尽 ${number}`,
+    name: `${base.name} / 无尽 ${number} / ${endlessStageLabel(number)}`,
     packs,
+    endlessStage: stage + 1,
+    scaling,
   };
 }
 
@@ -2344,6 +2398,8 @@ function clearBattleForMapPreview() {
     spawnQueue: [],
     spawnTimer: 0,
     waveCallTimer: 0,
+    prepTimer: 0,
+    prepTimerActive: false,
     enemies: [],
     towers: [],
     projectiles: [],
@@ -2697,11 +2753,13 @@ function placeTower(x, y) {
     angle: 0,
     cooldown: 0,
     targetId: null,
-    upgradeTimer: 0,
-    upgradeDuration: 0,
-    upgradeTargetLevel: null,
-    laserLocked: false,
-  });
+	    upgradeTimer: 0,
+	    upgradeDuration: 0,
+	    upgradeTargetLevel: null,
+	    upgradeFinalLevel: null,
+	    upgradeAutoQueued: false,
+	    laserLocked: false,
+	  });
   state.selectedTowerId = state.towers[state.towers.length - 1].id;
   recalcEnemyPaths();
   addLog(`建造${def.name}，坐标 ${x + 1}-${y + 1}。`);
@@ -2712,6 +2770,27 @@ function placeTower(x, y) {
 
 function selectedTower() {
   return state.towers.find((tower) => tower.id === state.selectedTowerId) || null;
+}
+
+function beginTowerUpgrade(tower, finalLevel, totalCost, autoQueued = false) {
+  state.money -= totalCost;
+  tower.upgradeFinalLevel = finalLevel;
+  tower.upgradeAutoQueued = autoQueued;
+  tower.upgradeTargetLevel = tower.level + 1;
+  tower.upgradeDuration = towerUpgradeDuration(tower);
+  tower.upgradeTimer = tower.upgradeDuration;
+  tower.targetId = null;
+  tower.cooldown = 0;
+  uiCache.quickMenu = "";
+  uiCache.selected = "";
+  addLog(
+    autoQueued
+      ? `${TOWER_TYPES[tower.type].name}开始连续升级，目标 ${finalLevel} 级，预计 ${towerQueuedUpgradeDuration(tower, finalLevel)} 秒。`
+      : `${TOWER_TYPES[tower.type].name}开始升级，预计 ${tower.upgradeDuration} 秒。`,
+  );
+  playSound("build");
+  pulseBoard("build");
+  showToast(autoQueued ? `连续升级中：目标 Lv.${finalLevel}` : `升级施工中：${tower.upgradeDuration}秒`);
 }
 
 function upgradeTower() {
@@ -2728,23 +2807,34 @@ function upgradeTower() {
     return;
   }
   const cost = upgradeCost(tower);
-  if (state.money < cost) {
+	  if (state.money < cost) {
+	    playSound("invalid");
+	    showToast("资金不足，无法升级");
+	    return;
+	  }
+  beginTowerUpgrade(tower, tower.level + 1, cost);
+}
+
+function upgradeTowerToMax() {
+  const tower = selectedTower();
+  if (!tower) return;
+  if (towerIsUpgrading(tower)) {
     playSound("invalid");
-    showToast("资金不足，无法升级");
+    showToast("这座炮塔正在升级");
     return;
   }
-  state.money -= cost;
-  tower.upgradeTargetLevel = tower.level + 1;
-  tower.upgradeDuration = towerUpgradeDuration(tower);
-  tower.upgradeTimer = tower.upgradeDuration;
-  tower.targetId = null;
-  tower.cooldown = 0;
-  uiCache.quickMenu = "";
-  uiCache.selected = "";
-  addLog(`${TOWER_TYPES[tower.type].name}开始升级，预计 ${tower.upgradeDuration} 秒。`);
-  playSound("build");
-  pulseBoard("build");
-  showToast(`升级施工中：${tower.upgradeDuration}秒`);
+  if (tower.level >= 3) {
+    playSound("invalid");
+    showToast("这座炮塔已满级");
+    return;
+  }
+  const cost = towerUpgradeCostToLevel(tower, 3);
+  if (state.money < cost) {
+    playSound("invalid");
+    showToast(`资金不足，升满需要 ¥${cost}`);
+    return;
+  }
+  beginTowerUpgrade(tower, 3, cost, true);
 }
 
 function sellTower() {
@@ -2761,8 +2851,28 @@ function sellTower() {
   showToast(`回收 ¥${refund}`);
 }
 
+function upgradeCostForLevel(tower, level) {
+  return Math.floor(TOWER_TYPES[tower.type].cost * (0.7 + level * 0.45));
+}
+
 function upgradeCost(tower) {
-  return Math.floor(TOWER_TYPES[tower.type].cost * (0.7 + tower.level * 0.45));
+  return upgradeCostForLevel(tower, tower.level);
+}
+
+function towerUpgradeCostToLevel(tower, targetLevel) {
+  let total = 0;
+  for (let level = tower.level; level < targetLevel; level += 1) {
+    total += upgradeCostForLevel(tower, level);
+  }
+  return total;
+}
+
+function towerQueuedUpgradeDuration(tower, targetLevel) {
+  let duration = 0;
+  for (let level = tower.level; level < targetLevel; level += 1) {
+    duration += level === 1 ? 4 : 8;
+  }
+  return duration;
 }
 
 function towerSellValue(tower) {
@@ -2933,7 +3043,7 @@ function prepareSpawnQueue(wave, offset = 0) {
   return queue;
 }
 
-function startWave() {
+function startWave(options = {}) {
   if (state.screen !== "playing") return;
   if (state.gameOver || state.won) return;
   const nextWave = nextWaveDefinition();
@@ -2953,6 +3063,7 @@ function startWave() {
   if (!wasActive) state.spawnTimer = 0;
   state.spawnQueue = state.spawnQueue.concat(prepareSpawnQueue(nextWave, state.spawnTimer)).sort((a, b) => a.delay - b.delay);
   state.waveCallTimer = 0;
+  clearWavePrepTimer();
   if (wasActive) {
     const bonus = earlyWaveBonus();
     state.money += bonus;
@@ -2961,7 +3072,7 @@ function startWave() {
   }
   addLog(`第 ${state.wave} 波开始：${nextWave.name}。`);
   playSound("wave");
-  if (!wasActive) showToast(`第 ${state.wave} 波：${nextWave.name}`);
+  if (!wasActive && !options.auto) showToast(`第 ${state.wave} 波：${nextWave.name}`);
 }
 
 function nextWaveCallRemaining() {
@@ -2977,6 +3088,45 @@ function earlyWaveBonus() {
   return 8 + state.wave;
 }
 
+function wavePrepDuration() {
+  if (state.wave <= 0) {
+    if (currentLevel().id === "tutorial") return 30;
+    return isEndlessMode() ? 18 : INITIAL_WAVE_DELAY;
+  }
+  if (currentLevel().id === "tutorial") return 18;
+  if (isEndlessMode()) return Math.max(ENDLESS_AUTO_WAVE_MIN_DELAY, AUTO_WAVE_DELAY - Math.floor(state.wave / 7));
+  return AUTO_WAVE_DELAY;
+}
+
+function armWavePrepTimer() {
+  if (state.screen !== "playing" || state.activeWave || state.gameOver || state.won || !nextWaveDefinition()) {
+    state.prepTimer = 0;
+    state.prepTimerActive = false;
+    return;
+  }
+  state.prepTimer = wavePrepDuration();
+  state.prepTimerActive = true;
+}
+
+function clearWavePrepTimer() {
+  state.prepTimer = 0;
+  state.prepTimerActive = false;
+}
+
+function updateWavePrepTimer(dt) {
+  if (!state.prepTimerActive || state.activeWave || state.gameOver || state.won) return;
+  if (!nextWaveDefinition()) {
+    clearWavePrepTimer();
+    return;
+  }
+  state.prepTimer = Math.max(0, state.prepTimer - dt);
+  if (state.prepTimer > 0) return;
+  const waveNumber = state.wave + 1;
+  addLog(`准备时间结束，第 ${waveNumber} 波自动开始。`);
+  showToast(`第 ${waveNumber} 波自动开始`);
+  startWave({ auto: true });
+}
+
 function spawnEnemy(item) {
   const entry = ENTRIES[resolveEntryIndex(item.entry)];
   const def = ENEMY_TYPES[item.type];
@@ -2986,7 +3136,10 @@ function spawnEnemy(item) {
   const path = findPath(start, CORE, { adaptive }) || findPath(start, CORE);
   const pos = center(start);
   const waveScale = 1 + Math.max(0, state.wave - 1) * 0.075;
-  const maxHp = def.hp * waveScale * level.enemyHpScale;
+  const endlessScale = isEndlessMode() ? endlessScalingForWave(state.wave) : null;
+  const maxHp = def.hp * waveScale * level.enemyHpScale * (endlessScale?.hp || 1);
+  const speed = def.speed * level.enemySpeedScale * (endlessScale?.speed || 1);
+  const reward = Math.max(1, Math.floor(def.reward * (isEndlessMode() ? 1 + Math.min(0.45, endlessScale.stage * 0.025) : 1)));
   state.enemies.push({
     id: crypto.randomUUID(),
     type: item.type,
@@ -2994,8 +3147,8 @@ function spawnEnemy(item) {
     y: pos.y,
     hp: maxHp,
     maxHp,
-    speed: def.speed * level.enemySpeedScale,
-    reward: def.reward,
+    speed,
+    reward,
     path: path || [start, CORE],
     pathIndex: 1,
     slowTimer: 0,
@@ -3023,6 +3176,7 @@ function update(dt) {
   if (state.screen !== "playing") return;
   if (state.paused || state.gameOver || state.won) return;
   const step = dt * state.speed;
+  updateWavePrepTimer(step);
   updateSpawns(step);
   updateEnemies(step);
   updateTowerUpgrades(step);
@@ -3038,18 +3192,27 @@ function updateTowerUpgrades(dt) {
     if (!towerIsUpgrading(tower)) continue;
     tower.upgradeTimer = Math.max(0, tower.upgradeTimer - dt);
     if (tower.upgradeTimer > 0) continue;
-    tower.level = tower.upgradeTargetLevel || tower.level;
-    tower.upgradeTargetLevel = null;
-    tower.upgradeDuration = 0;
-    tower.cooldown = 0;
-    uiCache.selected = "";
-    uiCache.quickMenu = "";
-    addLog(`${TOWER_TYPES[tower.type].name}升级完成，达到 ${tower.level} 级。`);
-    playSound("upgrade");
-    pulseBoard("build");
-    makeParticles(center(tower).x, center(tower).y, TOWER_TYPES[tower.type].color, 18);
-  }
-}
+	    tower.level = tower.upgradeTargetLevel || tower.level;
+	    tower.cooldown = 0;
+	    uiCache.selected = "";
+	    uiCache.quickMenu = "";
+	    addLog(`${TOWER_TYPES[tower.type].name}升级完成，达到 ${tower.level} 级。`);
+	    playSound("upgrade");
+	    pulseBoard("build");
+	    makeParticles(center(tower).x, center(tower).y, TOWER_TYPES[tower.type].color, 18);
+	    if (tower.upgradeFinalLevel && tower.level < tower.upgradeFinalLevel) {
+	      tower.upgradeTargetLevel = tower.level + 1;
+	      tower.upgradeDuration = towerUpgradeDuration(tower);
+	      tower.upgradeTimer = tower.upgradeDuration;
+	      addLog(`${TOWER_TYPES[tower.type].name}继续自动升级，目标 ${tower.upgradeFinalLevel} 级。`);
+	      continue;
+	    }
+	    tower.upgradeTargetLevel = null;
+	    tower.upgradeFinalLevel = null;
+	    tower.upgradeAutoQueued = false;
+	    tower.upgradeDuration = 0;
+	  }
+	}
 
 function updateSpawns(dt) {
   if (!state.activeWave) return;
@@ -3453,9 +3616,11 @@ function checkWaveEnd() {
       showToast("胜利：核心稳定");
       finishLevel(true);
     } else if (isEndlessMode()) {
-      showToast(`无尽第 ${state.wave} 波结束，奖励 ¥${bonus}`);
+      armWavePrepTimer();
+      showToast(`无尽第 ${state.wave} 波结束，奖励 ¥${bonus}，${Math.ceil(state.prepTimer)}秒后自动开波`);
     } else {
-      showToast(`第 ${state.wave} 波结束，奖励 ¥${bonus}`);
+      armWavePrepTimer();
+      showToast(`第 ${state.wave} 波结束，奖励 ¥${bonus}，${Math.ceil(state.prepTimer)}秒后自动开波`);
     }
   }
 }
@@ -4708,13 +4873,16 @@ function renderUi() {
   ui.levelSound.textContent = state.soundEnabled ? "音效：开" : "音效：关";
   ui.levelSound.classList.toggle("is-muted", !state.soundEnabled);
   const canStartAnyWave = Boolean(nextWaveDefinition());
+  const prepSuffix = state.prepTimerActive ? `（${Math.ceil(state.prepTimer)}s 自动）` : "";
   ui.start.disabled = state.screen !== "playing" || state.gameOver || state.won || !canStartAnyWave || (state.activeWave && !canCallNextWaveEarly());
   ui.start.textContent =
     state.activeWave && canStartAnyWave
       ? canCallNextWaveEarly()
         ? `提前呼叫下一波 +¥${earlyWaveBonus()}`
         : `提前呼叫 ${Math.ceil(nextWaveCallRemaining())}s`
-      : "开始下一波";
+      : state.wave <= 0
+        ? `开始第一波${prepSuffix}`
+        : `开始下一波${prepSuffix}`;
   ui.pause.disabled = state.screen !== "playing" || state.gameOver || state.won;
   ui.speedButton.disabled = state.screen !== "playing";
 
@@ -5365,19 +5533,27 @@ function renderQuickMenu() {
 
   const def = TOWER_TYPES[tower.type];
   const cost = upgradeCost(tower);
+  const maxCost = towerUpgradeCostToLevel(tower, 3);
   const upgrading = towerIsUpgrading(tower);
   const canUpgrade = tower.level < 3 && state.money >= cost && !upgrading;
-  const upgradeText = upgrading ? `升级中 ${tower.upgradeTimer.toFixed(1)}s` : tower.level >= 3 ? "已满级" : `升级 ¥${cost}`;
+  const canUpgradeMax = tower.level < 3 && state.money >= maxCost && !upgrading;
+  const upgradeText = upgrading
+    ? `${tower.upgradeAutoQueued ? "升满中" : "升级中"} ${tower.upgradeTimer.toFixed(1)}s`
+    : tower.level >= 3
+      ? "已满级"
+      : `升级 ¥${cost}`;
+  const maxUpgradeText = tower.level >= 3 ? "已满级" : `一键升满 ¥${maxCost}`;
   const refund = towerSellValue(tower);
   const laserButton = tower.type === "laser"
     ? `<button id="quickLaserLockButton">${tower.laserLocked ? "解除锁定" : "锁定朝向"}</button>`
     : "";
-  const keyValue = `${tower.id}:${tower.level}:${state.money}:${state.quickMenu.x}:${state.quickMenu.y}:${tower.upgradeTimer?.toFixed(1)}:${tower.laserLocked}`;
+  const keyValue = `${tower.id}:${tower.level}:${state.money}:${maxCost}:${state.quickMenu.x}:${state.quickMenu.y}:${tower.upgradeTimer?.toFixed(1)}:${tower.upgradeAutoQueued}:${tower.laserLocked}`;
 
   if (uiCache.quickMenu !== keyValue) {
     ui.quickMenu.innerHTML = `
       <div class="quick-menu-title">${def.name} Lv.${tower.level}</div>
       <button id="quickUpgradeButton" ${canUpgrade ? "" : "disabled"}>${upgradeText}</button>
+      <button id="quickMaxUpgradeButton" ${canUpgradeMax ? "" : "disabled"}>${maxUpgradeText}</button>
       ${laserButton}
       <button id="quickSellButton">出售 ¥${refund}</button>
     `;
@@ -5387,6 +5563,10 @@ function renderQuickMenu() {
     uiCache.quickMenu = keyValue;
     document.querySelector("#quickUpgradeButton")?.addEventListener("click", () => {
       upgradeTower();
+      renderQuickMenu();
+    });
+    document.querySelector("#quickMaxUpgradeButton")?.addEventListener("click", () => {
+      upgradeTowerToMax();
       renderQuickMenu();
     });
     document.querySelector("#quickLaserLockButton")?.addEventListener("click", () => {
@@ -5402,7 +5582,7 @@ function openTowerQuickMenu(tower, event) {
   state.selectedTowerId = tower.id;
   state.quickMenu.towerId = tower.id;
   state.quickMenu.x = clamp(event.clientX, 8, window.innerWidth - 178);
-  state.quickMenu.y = clamp(event.clientY, 8, window.innerHeight - (tower.type === "laser" ? 158 : 116));
+  state.quickMenu.y = clamp(event.clientY, 8, window.innerHeight - (tower.type === "laser" ? 198 : 156));
   uiCache.quickMenu = "";
   renderQuickMenu();
 }
@@ -5506,9 +5686,10 @@ function renderAuraTargetList(aura) {
 function renderSelectedCard() {
   const tower = selectedTower();
   if (tower) {
-    const def = TOWER_TYPES[tower.type];
-    const cost = upgradeCost(tower);
-    const upgrading = towerIsUpgrading(tower);
+	    const def = TOWER_TYPES[tower.type];
+	    const cost = upgradeCost(tower);
+	    const maxCost = towerUpgradeCostToLevel(tower, 3);
+	    const upgrading = towerIsUpgrading(tower);
     const range = Math.round(towerRange(tower));
     const rangeLabel = def.aura ? "光环" : def.laser ? "索敌" : "射程";
     const boost = towerBoost(tower);
@@ -5535,10 +5716,14 @@ function renderSelectedCard() {
     const laserAction = tower.type === "laser"
       ? `<button id="laserLockButton">${tower.laserLocked ? "解除锁定" : "锁定朝向"}</button>`
       : "";
-    const upgradeStatus = upgrading
-      ? `<span>升级中 <strong>${tower.upgradeTimer.toFixed(1)}s</strong></span>`
-      : `<span>升级 <strong>${tower.level >= 3 ? "满级" : `¥${cost}`}</strong></span>`;
-    const keyValue = `tower:${tower.id}:${tower.level}:${state.money}:${boost.range}:${boost.damage}:${boost.fireRate}:${tower.upgradeTimer?.toFixed(1)}:${tower.laserLocked}:${auraTargets(tower).map((item) => `${item.tower.id}:${item.active}`).join(",")}`;
+	    const upgradeStatus = upgrading
+	      ? `<span>${tower.upgradeAutoQueued ? "升满中" : "升级中"} <strong>${tower.upgradeTimer.toFixed(1)}s</strong></span>`
+	      : `<span>升级 <strong>${tower.level >= 3 ? "满级" : `¥${cost}`}</strong></span>`;
+	    const maxUpgradeStatus = !upgrading && tower.level < 3
+	      ? `<span>一键升满 <strong>¥${maxCost}</strong></span>`
+	      : "";
+	    const maxUpgradeButtonText = tower.level >= 3 ? "已满级" : "一键升满";
+	    const keyValue = `tower:${tower.id}:${tower.level}:${state.money}:${maxCost}:${boost.range}:${boost.damage}:${boost.fireRate}:${tower.upgradeTimer?.toFixed(1)}:${tower.upgradeAutoQueued}:${tower.laserLocked}:${auraTargets(tower).map((item) => `${item.tower.id}:${item.active}`).join(",")}`;
     const html = `
       <h2>已选炮塔</h2>
       <p><span class="tower-name">${def.name}</span>，等级 ${tower.level}。${def.text}</p>
@@ -5547,21 +5732,24 @@ function renderSelectedCard() {
         <span>下级${rangeLabel} <strong>${nextRange}</strong></span>
         ${combatLines}
         ${specialLines}
-        ${boostLine}
-        ${terrainLine}
-        ${upgradeStatus}
-      </div>
-      <div class="tower-actions">
-        <button id="upgradeTowerButton"${tower.level >= 3 || upgrading ? " disabled" : ""}>升级</button>
-        ${laserAction}
-        <button id="sellTowerButton">出售</button>
+	        ${boostLine}
+	        ${terrainLine}
+	        ${upgradeStatus}
+	        ${maxUpgradeStatus}
+	      </div>
+	      <div class="tower-actions">
+	        <button id="upgradeTowerButton"${tower.level >= 3 || upgrading ? " disabled" : ""}>升级</button>
+	        <button id="upgradeMaxTowerButton"${tower.level >= 3 || upgrading || state.money < maxCost ? " disabled" : ""}>${maxUpgradeButtonText}</button>
+	        ${laserAction}
+	        <button id="sellTowerButton">出售</button>
       </div>
       ${auraList}
     `;
     if (uiCache.selected !== keyValue) {
-      ui.selected.innerHTML = html;
-      uiCache.selected = keyValue;
-      document.querySelector("#upgradeTowerButton")?.addEventListener("click", upgradeTower);
+	      ui.selected.innerHTML = html;
+	      uiCache.selected = keyValue;
+	      document.querySelector("#upgradeTowerButton")?.addEventListener("click", upgradeTower);
+	      document.querySelector("#upgradeMaxTowerButton")?.addEventListener("click", upgradeTowerToMax);
       document.querySelector("#laserLockButton")?.addEventListener("click", () => {
         if (tower.laserLocked) unlockLaserTower(tower);
         else startLaserAim(tower);
@@ -5607,14 +5795,21 @@ function renderSelectedCard() {
 
 function renderWavePreview() {
   const next = nextWaveDefinition();
-  const keyValue = `preview:${state.gameMode}:${state.levelId}:${state.mapId}:${state.wave}`;
+  const prepSeconds = state.prepTimerActive ? Math.ceil(state.prepTimer) : 0;
+  const keyValue = `preview:${state.gameMode}:${state.levelId}:${state.mapId}:${state.wave}:${prepSeconds}`;
   if (uiCache.preview === keyValue) return;
   uiCache.preview = keyValue;
   if (!next) {
     ui.preview.innerHTML = `<p class="small">所有波次已清除。</p>`;
     return;
   }
-  ui.preview.innerHTML = next.packs
+  const prepLine = state.prepTimerActive
+    ? `<p class="small">准备时间 ${prepSeconds}s；倒计时结束后自动开波。</p>`
+    : "";
+  const endlessLine = isEndlessMode() && next.scaling
+    ? `<p class="small">无尽${endlessStageLabel(state.wave + 1)}：生命 +${Math.round((next.scaling.hp - 1) * 100)}%，速度 +${Math.round((next.scaling.speed - 1) * 100)}%，密度 +${Math.round((next.scaling.count - 1) * 100)}%。</p>`
+    : "";
+  ui.preview.innerHTML = prepLine + endlessLine + next.packs
     .map((pack) => {
       const enemy = ENEMY_TYPES[pack.type];
       const entry = ENTRIES[resolveEntryIndex(pack.entry)];
@@ -5981,6 +6176,9 @@ function startLevel(levelId, options = {}) {
     activeWave: false,
     spawnQueue: [],
     spawnTimer: 0,
+    waveCallTimer: 0,
+    prepTimer: 0,
+    prepTimerActive: false,
     enemies: [],
     towers: [],
     projectiles: [],
@@ -6027,6 +6225,8 @@ function startLevel(levelId, options = {}) {
   addLog(options.restart ? `${currentMode().name} / ${level.name} / ${currentMap().name} 重新开始。` : `${currentMode().name} / ${level.name} / ${currentMap().name} 开始。`);
   if (isEndlessMode()) addLog("无尽挑战没有最终胜利，失守后会记录本地前十榜。");
   if (!isEndlessMode() && level.id === "tutorial") addLog("教学演练不是必经流程，可以从关卡选择直接跳过。");
+  armWavePrepTimer();
+  addLog(`第 1 波将在 ${Math.ceil(state.prepTimer)} 秒后自动开始，也可以手动提前开始。`);
   playSound(options.restart ? "select" : "wave");
   showToast(options.restart ? "重新开始" : `进入：${currentMode().name}`);
   renderUi();
@@ -6038,6 +6238,8 @@ function finishLevel(won) {
   state.gameOver = !won;
   state.activeWave = false;
   state.spawnQueue = [];
+  state.prepTimer = 0;
+  state.prepTimerActive = false;
   state.screen = "settlement";
   state.endedAt = performance.now();
   state.endlessResult = isEndlessMode() ? recordEndlessScore() : null;
