@@ -1307,6 +1307,56 @@ const INITIAL_WAVE_DELAY = 22;
 const AUTO_WAVE_DELAY = 12;
 const ENDLESS_AUTO_WAVE_MIN_DELAY = 6;
 const ENDLESS_STAGE_SIZE = 6;
+const ULTIMATE_COST_MULTIPLIER = 9;
+
+const ULTIMATE_TRANSFORMS = {
+  gun: {
+    name: "超频弹幕",
+    duration: 16,
+    stats: { range: 1.1, damage: 1.18, fireRate: 1.85 },
+    text: "攻速大幅提升，并会对持续锁定的同一目标叠加伤害。",
+  },
+  cannon: {
+    name: "裂变弹头",
+    duration: 20,
+    stats: { range: 1.1, damage: 1.28, splash: 1.42 },
+    text: "爆炸范围扩大，命中后留下持续灼烧区。",
+  },
+  ice: {
+    name: "绝对零域",
+    duration: 18,
+    stats: { range: 1.12, damage: 1.2, frostRadius: 1.34 },
+    slowFactor: 0.18,
+    freezeTime: 0.48,
+    text: "减速进一步强化，并会短暂冻结冰爆范围内的敌人。",
+  },
+  pierce: {
+    name: "轨道穿刺",
+    duration: 22,
+    stats: { range: 1.18, damage: 1.72, fireRate: 0.92 },
+    beamWidth: 18,
+    text: "攻击变为窄线轨道射击，贯穿一整条直线并无视护甲。",
+  },
+  laser: {
+    name: "棱镜光束",
+    duration: 22,
+    stats: { range: 1.12, damage: 1.36, rayLength: 1.42, beamWidth: 1.45 },
+    branches: 3,
+    text: "主光束更长更宽，命中后会折射出短支线。",
+  },
+  shock: {
+    name: "震荡核心",
+    duration: 20,
+    stats: { range: 1.22, damage: 1.25, fireRate: 1.18, stunChance: 1.55, stunTime: 1.45 },
+    text: "冲击范围扩大，眩晕更稳定，并追加一次内圈余震。",
+  },
+  aura: {
+    name: "指挥中枢",
+    duration: 24,
+    stats: { range: 1.24 },
+    text: "光环范围扩大，并为范围内所有非光环塔同时提供射程、伤害和频率增益。",
+  },
+};
 
 const TERRAIN_TYPES = {
   high: {
@@ -2517,8 +2567,9 @@ function playSound(name) {
     cannon: 170,
     ice: 120,
     laser: 180,
-    shock: 240,
-    coreHit: 140,
+	    shock: 240,
+	    ultimate: 520,
+	    coreHit: 140,
     blast: 120,
     invalid: 180,
   };
@@ -2529,11 +2580,17 @@ function playSound(name) {
     playTone(220, 0.07, { type: "square", volume: 0.035 });
     playTone(520, 0.09, { type: "sine", volume: 0.04, delay: 0.035 });
   }
-  if (name === "upgrade") {
-    playTone(440, 0.06, { type: "triangle", volume: 0.035 });
-    playTone(660, 0.07, { type: "triangle", volume: 0.035, delay: 0.055 });
-    playTone(880, 0.09, { type: "sine", volume: 0.03, delay: 0.11 });
-  }
+	  if (name === "upgrade") {
+	    playTone(440, 0.06, { type: "triangle", volume: 0.035 });
+	    playTone(660, 0.07, { type: "triangle", volume: 0.035, delay: 0.055 });
+	    playTone(880, 0.09, { type: "sine", volume: 0.03, delay: 0.11 });
+	  }
+	  if (name === "ultimate") {
+	    playTone(260, 0.12, { type: "triangle", volume: 0.045 });
+	    playTone(520, 0.14, { type: "sine", volume: 0.045, delay: 0.08 });
+	    playTone(1040, 0.18, { type: "triangle", volume: 0.035, delay: 0.18 });
+	    playNoise(0.16, { frequency: 880, volume: 0.02, delay: 0.06 });
+	  }
   if (name === "sell") playTone(420, 0.14, { type: "sawtooth", endFrequency: 190, volume: 0.04 });
   if (name === "invalid") playTone(120, 0.12, { type: "sawtooth", endFrequency: 75, volume: 0.035 });
   if (name === "wave") {
@@ -2758,6 +2815,9 @@ function placeTower(x, y) {
 	    upgradeTargetLevel: null,
 	    upgradeFinalLevel: null,
 	    upgradeAutoQueued: false,
+	    ultimate: false,
+	    ultimateTimer: 0,
+	    ultimateDuration: 0,
 	    laserLocked: false,
 	  });
   state.selectedTowerId = state.towers[state.towers.length - 1].id;
@@ -2837,6 +2897,50 @@ function upgradeTowerToMax() {
   beginTowerUpgrade(tower, 3, cost, true);
 }
 
+function transformTowerUltimate() {
+  const tower = selectedTower();
+  if (!tower) return;
+  const ultimate = ultimateDef(tower);
+  if (!ultimate) return;
+  if (!isEndlessMode()) {
+    playSound("invalid");
+    showToast("终极改造只在无尽挑战开放");
+    return;
+  }
+  if (towerIsUpgrading(tower)) {
+    playSound("invalid");
+    showToast("这座炮塔正在施工");
+    return;
+  }
+  if (tower.level < 3) {
+    playSound("invalid");
+    showToast("炮塔达到 Lv.3 后才能终极改造");
+    return;
+  }
+  if (tower.ultimate) {
+    playSound("invalid");
+    showToast("这座炮塔已完成终极改造");
+    return;
+  }
+  const cost = ultimateCost(tower);
+  if (state.money < cost) {
+    playSound("invalid");
+    showToast(`资金不足，终极改造需要 ¥${cost}`);
+    return;
+  }
+  state.money -= cost;
+  tower.ultimateTimer = ultimate.duration;
+  tower.ultimateDuration = ultimate.duration;
+  tower.targetId = null;
+  tower.cooldown = 0;
+  uiCache.quickMenu = "";
+  uiCache.selected = "";
+  addLog(`${TOWER_TYPES[tower.type].name}开始终极改造：${ultimate.name}，预计 ${ultimate.duration} 秒。`);
+  playSound("ultimate");
+  pulseBoard("build");
+  showToast(`终极改造中：${ultimate.name}`);
+}
+
 function sellTower() {
   const tower = selectedTower();
   if (!tower) return;
@@ -2867,6 +2971,14 @@ function towerUpgradeCostToLevel(tower, targetLevel) {
   return total;
 }
 
+function normalUpgradeInvestmentForType(type) {
+  return upgradeCostForLevel({ type }, 1) + upgradeCostForLevel({ type }, 2);
+}
+
+function ultimateCost(tower) {
+  return Math.floor(normalUpgradeInvestmentForType(tower.type) * ULTIMATE_COST_MULTIPLIER);
+}
+
 function towerQueuedUpgradeDuration(tower, targetLevel) {
   let duration = 0;
   for (let level = tower.level; level < targetLevel; level += 1) {
@@ -2876,18 +2988,33 @@ function towerQueuedUpgradeDuration(tower, targetLevel) {
 }
 
 function towerSellValue(tower) {
-  return Math.floor(TOWER_TYPES[tower.type].cost * (0.55 + tower.level * 0.12));
+  const ultimateRefund = tower.ultimate || tower.ultimateTimer > 0 ? Math.floor(ultimateCost(tower) * 0.42) : 0;
+  return Math.floor(TOWER_TYPES[tower.type].cost * (0.55 + tower.level * 0.12)) + ultimateRefund;
 }
 
 function towerLevelMultiplier(tower, stat) {
   return 1 + (tower.level - 1) * (TOWER_LEVEL_SCALING[stat] || 0);
 }
 
-function baseTowerRange(tower) {
-  return TOWER_TYPES[tower.type].range * towerLevelMultiplier(tower, "range");
+function ultimateDef(towerOrType) {
+  const type = typeof towerOrType === "string" ? towerOrType : towerOrType?.type;
+  return ULTIMATE_TRANSFORMS[type] || null;
 }
 
-function auraBuffFor(towerType, auraLevel) {
+function towerHasUltimate(tower) {
+  return Boolean(tower?.ultimate);
+}
+
+function ultimateStatMultiplier(tower, stat) {
+  if (!towerHasUltimate(tower)) return 1;
+  return ultimateDef(tower)?.stats?.[stat] || 1;
+}
+
+function baseTowerRange(tower) {
+  return TOWER_TYPES[tower.type].range * towerLevelMultiplier(tower, "range") * ultimateStatMultiplier(tower, "range");
+}
+
+function auraBuffFor(towerType, auraLevel, ultimate = false) {
   const primary = 0.12 + (auraLevel - 1) * 0.07;
   const secondary = auraLevel >= 3 ? 0.1 : 0;
   const empty = { range: 1, damage: 1, fireRate: 1 };
@@ -2899,11 +3026,17 @@ function auraBuffFor(towerType, auraLevel) {
     laser: { damage: 1 + primary, range: 1 + secondary },
     shock: { fireRate: 1 + primary, range: 1 + secondary },
   };
-  return { ...empty, ...(plans[towerType] || {}) };
+  const boost = { ...empty, ...(plans[towerType] || {}) };
+  if (ultimate) {
+    boost.range = Math.max(boost.range, 1.18);
+    boost.damage = Math.max(boost.damage, 1.22);
+    boost.fireRate = Math.max(boost.fireRate, 1.22);
+  }
+  return boost;
 }
 
 function towerIsUpgrading(tower) {
-  return Boolean(tower?.upgradeTimer > 0);
+  return Boolean(tower?.upgradeTimer > 0 || tower?.ultimateTimer > 0);
 }
 
 function towerUpgradeDuration(tower) {
@@ -2936,7 +3069,7 @@ function towerBoost(tower) {
     if (aura.type !== "aura" || aura.id === tower.id || towerIsUpgrading(aura)) continue;
     const auraRange = baseTowerRange(aura) * towerTerrainBoost(aura).range;
     if (dist(towerCenter, center(aura)) > auraRange) continue;
-    const nextBoost = auraBuffFor(tower.type, aura.level);
+    const nextBoost = auraBuffFor(tower.type, aura.level, towerHasUltimate(aura));
     let improved = false;
     for (const stat of ["range", "damage", "fireRate"]) {
       if (nextBoost[stat] > auraBoost[stat]) {
@@ -2963,7 +3096,7 @@ function auraTargets(aura) {
     .filter((tower) => tower.type !== "aura" && tower.id !== aura.id)
     .map((tower) => ({
       tower,
-      boost: auraBuffFor(tower.type, aura.level),
+      boost: auraBuffFor(tower.type, aura.level, towerHasUltimate(aura)),
       active: towerBoost(tower).sourceId === aura.id,
       distance: dist(auraCenter, center(tower)),
     }))
@@ -2980,46 +3113,48 @@ function towerVisionRange(tower) {
 }
 
 function towerDamage(tower) {
-  return TOWER_TYPES[tower.type].damage * towerLevelMultiplier(tower, "damage") * towerBoost(tower).damage;
+  return TOWER_TYPES[tower.type].damage * towerLevelMultiplier(tower, "damage") * ultimateStatMultiplier(tower, "damage") * towerBoost(tower).damage;
 }
 
 function towerFireRate(tower) {
-  return TOWER_TYPES[tower.type].fireRate * towerLevelMultiplier(tower, "fireRate") * towerBoost(tower).fireRate;
+  return TOWER_TYPES[tower.type].fireRate * towerLevelMultiplier(tower, "fireRate") * ultimateStatMultiplier(tower, "fireRate") * towerBoost(tower).fireRate;
 }
 
 function towerSplash(tower) {
   const splash = TOWER_TYPES[tower.type].splash || 0;
-  return splash * towerLevelMultiplier(tower, "splash");
+  return splash * towerLevelMultiplier(tower, "splash") * ultimateStatMultiplier(tower, "splash");
 }
 
 function towerFrostRadius(tower) {
   const radius = TOWER_TYPES[tower.type].frostRadius || 0;
-  return radius * towerLevelMultiplier(tower, "frostRadius");
+  return radius * towerLevelMultiplier(tower, "frostRadius") * ultimateStatMultiplier(tower, "frostRadius");
 }
 
 function towerRayLength(tower) {
   const length = TOWER_TYPES[tower.type].rayLength || 0;
-  return length * towerLevelMultiplier(tower, "rayLength") * towerBoost(tower).range;
+  return length * towerLevelMultiplier(tower, "rayLength") * ultimateStatMultiplier(tower, "rayLength") * towerBoost(tower).range;
 }
 
 function towerBeamWidth(tower) {
   const width = TOWER_TYPES[tower.type].beamWidth || 0;
-  return width * towerLevelMultiplier(tower, "beamWidth");
+  return width * towerLevelMultiplier(tower, "beamWidth") * ultimateStatMultiplier(tower, "beamWidth");
 }
 
 function towerStunChance(tower) {
   const chance = TOWER_TYPES[tower.type].stunChance || 0;
-  return clamp(chance * towerLevelMultiplier(tower, "stunChance"), 0, 0.72);
+  const cap = towerHasUltimate(tower) ? 0.92 : 0.72;
+  return clamp(chance * towerLevelMultiplier(tower, "stunChance") * ultimateStatMultiplier(tower, "stunChance"), 0, cap);
 }
 
 function towerStunTime(tower) {
   const time = TOWER_TYPES[tower.type].stunTime || 0;
-  return time * towerLevelMultiplier(tower, "stunTime");
+  return time * towerLevelMultiplier(tower, "stunTime") * ultimateStatMultiplier(tower, "stunTime");
 }
 
 function towerSlowFactor(tower) {
   const base = TOWER_TYPES[tower.type].slow;
   if (!base) return null;
+  if (towerHasUltimate(tower) && ultimateDef(tower)?.slowFactor) return ultimateDef(tower).slowFactor;
   return clamp(base - (tower.level - 1) * TOWER_LEVEL_SCALING.slowPercent, 0.24, base);
 }
 
@@ -3189,7 +3324,31 @@ function update(dt) {
 
 function updateTowerUpgrades(dt) {
   for (const tower of state.towers) {
-    if (!towerIsUpgrading(tower)) continue;
+    if (tower.ultimateTimer > 0) {
+      tower.ultimateTimer = Math.max(0, tower.ultimateTimer - dt);
+      if (tower.ultimateTimer > 0) continue;
+      tower.ultimate = true;
+      tower.ultimateDuration = 0;
+      tower.cooldown = 0;
+      uiCache.selected = "";
+      uiCache.quickMenu = "";
+      const ultimate = ultimateDef(tower);
+      addLog(`${TOWER_TYPES[tower.type].name}终极改造完成：${ultimate.name}。`);
+      playSound("ultimate");
+      pulseBoard("build");
+      const c = center(tower);
+      makeParticles(c.x, c.y, TOWER_TYPES[tower.type].color, 36);
+      addAreaEffect({
+        type: "ultimate",
+        x: c.x,
+        y: c.y,
+        radius: 56,
+        color: TOWER_TYPES[tower.type].color,
+        affected: [],
+      });
+      continue;
+    }
+    if (!(tower.upgradeTimer > 0)) continue;
     tower.upgradeTimer = Math.max(0, tower.upgradeTimer - dt);
     if (tower.upgradeTimer > 0) continue;
 	    tower.level = tower.upgradeTargetLevel || tower.level;
@@ -3350,23 +3509,73 @@ function fireTower(tower, enemy) {
     fireLaser(tower, enemy);
     return;
   }
+  if (towerHasUltimate(tower) && tower.type === "pierce") {
+    fireRailShot(tower, enemy);
+    return;
+  }
   const towerCenter = center(tower);
   const slowFactor = towerSlowFactor(tower);
+  const ultimate = towerHasUltimate(tower) ? ultimateDef(tower) : null;
   state.projectiles.push({
     x: towerCenter.x,
     y: towerCenter.y,
     targetId: enemy.id,
     towerType: tower.type,
-    damage: towerDamage(tower),
+    damage: tower.type === "gun" && ultimate ? towerDamage(tower) * gunUltimateFocusMultiplier(tower, enemy) : towerDamage(tower),
     splash: towerSplash(tower),
     frostRadius: towerFrostRadius(tower),
     slow: slowFactor,
     slowTime: def.slowTime || 0,
     pierce: Boolean(def.pierce),
     color: def.color,
+    ultimate: ultimate?.name || "",
     speed: tower.type === "cannon" ? 360 : 560,
   });
   playTowerFireSound(tower.type);
+}
+
+function gunUltimateFocusMultiplier(tower, enemy) {
+  if (tower.focusTargetId === enemy.id) {
+    tower.focusStacks = Math.min(8, (tower.focusStacks || 0) + 1);
+  } else {
+    tower.focusTargetId = enemy.id;
+    tower.focusStacks = 1;
+  }
+  return 1 + tower.focusStacks * 0.075;
+}
+
+function fireRailShot(tower, target) {
+  const origin = center(tower);
+  const angle = tower.angle || Math.atan2(target.y - origin.y, target.x - origin.x);
+  const cos = Math.cos(angle);
+  const sin = Math.sin(angle);
+  const length = towerRange(tower) + 96;
+  const width = ultimateDef(tower)?.beamWidth || 18;
+  const affected = [];
+  for (const enemy of state.enemies) {
+    const dx = enemy.x - origin.x;
+    const dy = enemy.y - origin.y;
+    const projection = dx * cos + dy * sin;
+    if (projection < 0 || projection > length) continue;
+    const perpendicular = Math.abs(-sin * dx + cos * dy);
+    if (perpendicular > width / 2 + enemyRadius(enemy) * 0.72) continue;
+    const falloff = 1 - (projection / length) * 0.12;
+    damageEnemy(enemy, towerDamage(tower) * falloff, { pierce: true });
+    affected.push(enemy.id);
+  }
+  addAreaEffect({
+    type: "rail",
+    x: origin.x,
+    y: origin.y,
+    angle,
+    length,
+    width,
+    color: TOWER_TYPES.pierce.color,
+    affected,
+  });
+  playSound("pierce");
+  shakeScreen(2.6, 0.12);
+  if (target) makeParticles(target.x, target.y, TOWER_TYPES.pierce.color, 12);
 }
 
 function laserLineEnemies(tower, angle = tower.angle || 0) {
@@ -3400,10 +3609,34 @@ function fireLaser(tower, target) {
   const length = towerRayLength(tower);
   const width = towerBeamWidth(tower);
   const affected = [];
+  const branches = [];
   for (const { enemy, projection } of laserLineEnemies(tower, angle)) {
     const falloff = 1 - (projection / length) * 0.18;
     damageEnemy(enemy, towerDamage(tower) * falloff, { pierce: false });
     affected.push(enemy.id);
+  }
+  if (towerHasUltimate(tower)) {
+    const branchLimit = ultimateDef(tower)?.branches || 0;
+    const anchors = affected
+      .map((id) => state.enemies.find((enemy) => enemy.id === id))
+      .filter(Boolean)
+      .slice(0, branchLimit);
+    const branchHitIds = new Set(affected);
+    for (const anchor of anchors) {
+      const candidate = state.enemies
+        .filter((enemy) => !branchHitIds.has(enemy.id) && dist(anchor, enemy) <= 112)
+        .sort((a, b) => dist(anchor, a) - dist(anchor, b))[0];
+      if (!candidate) continue;
+      damageEnemy(candidate, towerDamage(tower) * 0.48, { pierce: false });
+      branchHitIds.add(candidate.id);
+      affected.push(candidate.id);
+      branches.push({
+        x: anchor.x,
+        y: anchor.y,
+        endX: candidate.x,
+        endY: candidate.y,
+      });
+    }
   }
   addAreaEffect({
     type: "laser",
@@ -3414,6 +3647,7 @@ function fireLaser(tower, target) {
     width,
     color: TOWER_TYPES.laser.color,
     affected,
+    branches,
   });
   playSound("laser");
   if (target) makeParticles(target.x, target.y, TOWER_TYPES.laser.color, 8);
@@ -3424,6 +3658,7 @@ function fireShockwave(tower) {
   const radius = towerRange(tower);
   const affected = [];
   const stunned = [];
+  const ultimate = towerHasUltimate(tower);
   for (const enemy of state.enemies) {
     if (dist(origin, enemy) > radius + enemyRadius(enemy) * 0.5) continue;
     damageEnemy(enemy, towerDamage(tower), { pierce: false });
@@ -3431,6 +3666,16 @@ function fireShockwave(tower) {
     if (Math.random() < towerStunChance(tower)) {
       applyStun(enemy, towerStunTime(tower));
       stunned.push(enemy.id);
+    }
+  }
+  if (ultimate) {
+    const innerRadius = radius * 0.62;
+    for (const enemy of state.enemies) {
+      if (dist(origin, enemy) > innerRadius + enemyRadius(enemy) * 0.5) continue;
+      damageEnemy(enemy, towerDamage(tower) * 0.45, { pierce: false });
+      applyStun(enemy, towerStunTime(tower) * 0.42);
+      if (!affected.includes(enemy.id)) affected.push(enemy.id);
+      if (!stunned.includes(enemy.id)) stunned.push(enemy.id);
     }
   }
   addAreaEffect({
@@ -3441,6 +3686,7 @@ function fireShockwave(tower) {
     color: TOWER_TYPES.shock.color,
     affected,
     stunned,
+    ultimate,
   });
   playSound("shock");
   shakeScreen(3.6, 0.18);
@@ -3478,6 +3724,9 @@ function hitEnemy(projectile, target) {
     for (const enemy of state.enemies) {
       if (dist(projectile, enemy) <= radius) {
         damageEnemy(enemy, projectile.damage, projectile);
+        if (projectile.towerType === "ice" && projectile.ultimate) {
+          applyStun(enemy, ULTIMATE_TRANSFORMS.ice.freezeTime);
+        }
         affected.push(enemy.id);
       }
     }
@@ -3492,6 +3741,18 @@ function hitEnemy(projectile, target) {
     if (projectile.splash) {
       playSound("blast");
       shakeScreen(4.4, 0.16);
+      if (projectile.ultimate) {
+        addAreaEffect({
+          type: "burn",
+          x: projectile.x,
+          y: projectile.y,
+          radius: radius * 0.86,
+          color: projectile.color,
+          damagePerSecond: projectile.damage * 0.18,
+          affected: [],
+          life: 2.4,
+        });
+      }
     }
     makeParticles(projectile.x, projectile.y, projectile.color, projectile.frostRadius ? 22 : 18);
   } else {
@@ -3532,9 +3793,12 @@ function applyStun(enemy, duration) {
 function addAreaEffect(effect) {
   const lifetimes = {
     laser: 0.22,
+    rail: 0.24,
     shock: 0.9,
     frost: 1.05,
     blast: 0.82,
+    burn: 2.4,
+    ultimate: 1.15,
   };
   const life = effect.life || lifetimes[effect.type] || 0.82;
   state.effects.push({
@@ -3583,6 +3847,14 @@ function updateParticles(dt) {
 
 function updateEffects(dt) {
   for (const effect of state.effects) {
+    if (effect.type === "burn") {
+      effect.affected = [];
+      for (const enemy of state.enemies) {
+        if (dist(effect, enemy) > effect.radius + enemyRadius(enemy) * 0.45) continue;
+        damageEnemy(enemy, (effect.damagePerSecond || 0) * dt, { pierce: false });
+        effect.affected.push(enemy.id);
+      }
+    }
     effect.life -= dt;
   }
   state.effects = state.effects.filter((effect) => effect.life > 0);
@@ -4135,14 +4407,14 @@ function drawTowers() {
       }
     }
     drawAuraBoostMark(tower, c);
-    drawTowerShell(c, def, tower.level, selected);
+    drawTowerShell(c, def, tower.level, selected, tower.ultimate || tower.ultimateTimer > 0);
     drawTowerShape(c, tower, def);
     drawLaserLockMark(tower, c);
     drawTowerUpgradeProgress(tower, c);
     ctx.fillStyle = "#08110f";
     ctx.font = "bold 12px sans-serif";
     ctx.textAlign = "center";
-    ctx.fillText(String(tower.level), c.x, c.y + 5);
+    ctx.fillText(tower.ultimate ? "终" : String(tower.level), c.x, c.y + 5);
     ctx.textAlign = "left";
     ctx.lineWidth = 1;
   }
@@ -4150,9 +4422,12 @@ function drawTowers() {
 
 function drawTowerUpgradeProgress(tower, c) {
   if (!towerIsUpgrading(tower)) return;
-  const progress = 1 - tower.upgradeTimer / tower.upgradeDuration;
+  const ultimate = tower.ultimateTimer > 0;
+  const timer = ultimate ? tower.ultimateTimer : tower.upgradeTimer;
+  const duration = ultimate ? tower.ultimateDuration : tower.upgradeDuration;
+  const progress = 1 - timer / duration;
   ctx.save();
-  ctx.fillStyle = "rgba(7, 13, 14, 0.56)";
+  ctx.fillStyle = ultimate ? "rgba(42, 32, 9, 0.58)" : "rgba(7, 13, 14, 0.56)";
   ctx.beginPath();
   ctx.arc(c.x, c.y, 30, 0, Math.PI * 2);
   ctx.fill();
@@ -4161,7 +4436,7 @@ function drawTowerUpgradeProgress(tower, c) {
   ctx.beginPath();
   ctx.arc(c.x, c.y, 29, 0, Math.PI * 2);
   ctx.stroke();
-  ctx.strokeStyle = TOWER_TYPES[tower.type].color;
+  ctx.strokeStyle = ultimate ? "#fff0a6" : TOWER_TYPES[tower.type].color;
   ctx.lineWidth = 5;
   ctx.beginPath();
   ctx.arc(c.x, c.y, 29, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * progress);
@@ -4169,7 +4444,7 @@ function drawTowerUpgradeProgress(tower, c) {
   ctx.fillStyle = "#eafff6";
   ctx.font = "bold 11px sans-serif";
   ctx.textAlign = "center";
-  ctx.fillText(`${tower.upgradeTimer.toFixed(1)}s`, c.x, c.y + 34);
+  ctx.fillText(`${ultimate ? "终" : ""}${timer.toFixed(1)}s`, c.x, c.y + 34);
   ctx.textAlign = "left";
   ctx.restore();
 }
@@ -4244,11 +4519,20 @@ function drawAuraFields() {
     const selected = aura.id === state.selectedTowerId;
     const pulse = 0.5 + Math.sin(performance.now() / 420 + aura.x) * 0.5;
     ctx.save();
-    ctx.strokeStyle = `rgba(196, 181, 253, ${selected ? 0.48 : 0.18 + pulse * 0.12})`;
-    ctx.lineWidth = 2;
+    ctx.strokeStyle = aura.ultimate
+      ? `rgba(255, 240, 166, ${selected ? 0.58 : 0.28 + pulse * 0.16})`
+      : `rgba(196, 181, 253, ${selected ? 0.48 : 0.18 + pulse * 0.12})`;
+    ctx.lineWidth = aura.ultimate ? 3 : 2;
     ctx.beginPath();
-    ctx.arc(c.x, c.y, 23 + pulse * 3, 0, Math.PI * 2);
+    ctx.arc(c.x, c.y, (aura.ultimate ? 28 : 23) + pulse * 3, 0, Math.PI * 2);
     ctx.stroke();
+    if (aura.ultimate) {
+      ctx.strokeStyle = `rgba(196, 181, 253, ${0.18 + pulse * 0.12})`;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(c.x, c.y, 40 + pulse * 5, 0, Math.PI * 2);
+      ctx.stroke();
+    }
     if (selected) {
       for (const item of auraTargets(aura)) {
         drawAuraTargetLink(c, item);
@@ -4261,8 +4545,13 @@ function drawAuraFields() {
 function drawAuraTargetLink(origin, item) {
   const target = center(item.tower);
   const def = TOWER_TYPES[item.tower.type];
+  const ultimateSource = towerHasUltimate(state.towers.find((tower) => tower.id === state.selectedTowerId));
   ctx.save();
-  ctx.strokeStyle = item.active ? "rgba(196,181,253,0.62)" : "rgba(157,176,173,0.28)";
+  ctx.strokeStyle = item.active
+    ? ultimateSource
+      ? "rgba(255,240,166,0.7)"
+      : "rgba(196,181,253,0.62)"
+    : "rgba(157,176,173,0.28)";
   ctx.lineWidth = item.active ? 3 : 2;
   ctx.beginPath();
   ctx.moveTo(origin.x, origin.y);
@@ -4305,7 +4594,7 @@ function drawAuraBoostMark(tower, c) {
   ctx.restore();
 }
 
-function drawTowerShell(c, def, level, selected) {
+function drawTowerShell(c, def, level, selected, ultimate = false) {
   const half = 15 + level;
   ctx.fillStyle = "#101719";
   ctx.fillRect(c.x - half, c.y - half, half * 2, half * 2);
@@ -4328,12 +4617,30 @@ function drawTowerShell(c, def, level, selected) {
     ctx.arc(c.x, c.y, 22, 0, Math.PI * 2);
     ctx.stroke();
   }
+  if (ultimate) {
+    const pulse = 0.5 + Math.sin(performance.now() / 280) * 0.5;
+    ctx.strokeStyle = `rgba(255, 240, 166, ${0.62 + pulse * 0.24})`;
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.arc(c.x, c.y, 27 + pulse * 2, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.strokeStyle = def.color;
+    ctx.globalAlpha = 0.42;
+    ctx.beginPath();
+    ctx.arc(c.x, c.y, 32, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
 }
 
 function drawTowerShape(c, tower, def) {
   ctx.save();
   ctx.translate(c.x, c.y);
   if (tower.type !== "ice" && tower.type !== "aura") ctx.rotate(tower.angle || 0);
+  if (tower.ultimate) {
+    ctx.shadowColor = "#fff0a6";
+    ctx.shadowBlur = 10;
+  }
   ctx.fillStyle = def.color;
   ctx.strokeStyle = def.color;
   ctx.lineWidth = 3;
@@ -4344,6 +4651,69 @@ function drawTowerShape(c, tower, def) {
   if (tower.type === "laser") drawLaserTower(tower.level);
   if (tower.type === "shock") drawShockTower(tower.level);
   if (tower.type === "aura") drawAuraTower(tower.level);
+  if (tower.ultimate) drawUltimateTowerOverlay(tower.type);
+  ctx.restore();
+}
+
+function drawUltimateTowerOverlay(type) {
+  ctx.save();
+  ctx.shadowBlur = 0;
+  ctx.strokeStyle = "#fff0a6";
+  ctx.fillStyle = "#fff0a6";
+  ctx.lineWidth = 2;
+  if (type === "gun") {
+    ctx.strokeRect(-18, -16, 9, 9);
+    ctx.strokeRect(-18, 7, 9, 9);
+    ctx.fillRect(27, -7, 6, 3);
+    ctx.fillRect(27, 4, 6, 3);
+  }
+  if (type === "cannon") {
+    ctx.beginPath();
+    ctx.arc(0, 0, 21, -0.25 * Math.PI, 1.18 * Math.PI);
+    ctx.stroke();
+    ctx.fillRect(28, -8, 7, 16);
+  }
+  if (type === "ice") {
+    for (let i = 0; i < 8; i += 1) {
+      const angle = (Math.PI * 2 * i) / 8;
+      ctx.beginPath();
+      ctx.moveTo(Math.cos(angle) * 20, Math.sin(angle) * 20);
+      ctx.lineTo(Math.cos(angle) * 28, Math.sin(angle) * 28);
+      ctx.stroke();
+    }
+  }
+  if (type === "pierce") {
+    ctx.beginPath();
+    ctx.moveTo(-18, -13);
+    ctx.lineTo(35, 0);
+    ctx.lineTo(-18, 13);
+    ctx.stroke();
+  }
+  if (type === "laser") {
+    ctx.beginPath();
+    ctx.moveTo(12, 0);
+    ctx.lineTo(35, -13);
+    ctx.moveTo(12, 0);
+    ctx.lineTo(35, 13);
+    ctx.stroke();
+  }
+  if (type === "shock") {
+    ctx.beginPath();
+    ctx.arc(0, 0, 24, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(0, 0, 30, 0.2 * Math.PI, 1.65 * Math.PI);
+    ctx.stroke();
+  }
+  if (type === "aura") {
+    ctx.beginPath();
+    ctx.moveTo(-13, -22);
+    ctx.lineTo(-4, -14);
+    ctx.lineTo(0, -25);
+    ctx.lineTo(4, -14);
+    ctx.lineTo(13, -22);
+    ctx.stroke();
+  }
   ctx.restore();
 }
 
@@ -4676,8 +5046,14 @@ function drawAreaEffects() {
     ctx.save();
     if (effect.type === "laser") {
       drawLaserEffect(effect, alpha);
+    } else if (effect.type === "rail") {
+      drawRailEffect(effect, alpha);
     } else if (effect.type === "shock") {
       drawShockEffect(effect, progress, alpha);
+    } else if (effect.type === "burn") {
+      drawBurnEffect(effect, progress, alpha);
+    } else if (effect.type === "ultimate") {
+      drawUltimateEffect(effect, progress, alpha);
     } else if (effect.type === "frost") {
       const radius = effect.radius * (0.72 + progress * 0.34);
       ctx.fillStyle = `rgba(98, 200, 220, ${0.24 * alpha})`;
@@ -4712,7 +5088,7 @@ function drawAreaEffects() {
       ctx.stroke();
     }
 
-    for (const id of effect.affected) {
+    for (const id of effect.affected || []) {
       const enemy = state.enemies.find((item) => item.id === id);
       if (!enemy) continue;
       ctx.strokeStyle =
@@ -4720,6 +5096,10 @@ function drawAreaEffects() {
           ? `rgba(190, 245, 255, ${alpha})`
           : effect.type === "laser"
             ? `rgba(255, 205, 235, ${alpha})`
+            : effect.type === "rail"
+              ? `rgba(255, 210, 194, ${alpha})`
+              : effect.type === "burn"
+                ? `rgba(255, 176, 96, ${alpha})`
             : effect.type === "shock"
               ? `rgba(232, 255, 178, ${alpha})`
               : `rgba(255, 236, 159, ${alpha})`;
@@ -4758,14 +5138,57 @@ function drawLaserEffect(effect, alpha) {
   ctx.moveTo(effect.x + sin * effect.width * 0.42, effect.y - cos * effect.width * 0.42);
   ctx.lineTo(endX + sin * effect.width * 0.42, endY - cos * effect.width * 0.42);
   ctx.stroke();
+  for (const branch of effect.branches || []) {
+    ctx.strokeStyle = `rgba(255, 238, 250, ${0.68 * alpha})`;
+    ctx.lineWidth = Math.max(2, effect.width * 0.22);
+    ctx.beginPath();
+    ctx.moveTo(branch.x, branch.y);
+    ctx.lineTo(branch.endX, branch.endY);
+    ctx.stroke();
+    ctx.strokeStyle = `rgba(244, 114, 182, ${0.32 * alpha})`;
+    ctx.lineWidth = Math.max(5, effect.width * 0.62);
+    ctx.beginPath();
+    ctx.moveTo(branch.x, branch.y);
+    ctx.lineTo(branch.endX, branch.endY);
+    ctx.stroke();
+  }
+  ctx.lineCap = "butt";
+}
+
+function drawRailEffect(effect, alpha) {
+  const cos = Math.cos(effect.angle);
+  const sin = Math.sin(effect.angle);
+  const endX = effect.x + cos * effect.length;
+  const endY = effect.y + sin * effect.length;
+  ctx.lineCap = "round";
+  ctx.strokeStyle = `rgba(240, 127, 98, ${0.28 * alpha})`;
+  ctx.lineWidth = effect.width * 1.8;
+  ctx.beginPath();
+  ctx.moveTo(effect.x, effect.y);
+  ctx.lineTo(endX, endY);
+  ctx.stroke();
+  ctx.strokeStyle = `rgba(255, 240, 226, ${0.92 * alpha})`;
+  ctx.lineWidth = Math.max(3, effect.width * 0.34);
+  ctx.beginPath();
+  ctx.moveTo(effect.x, effect.y);
+  ctx.lineTo(endX, endY);
+  ctx.stroke();
+  ctx.strokeStyle = `rgba(255, 170, 120, ${0.74 * alpha})`;
+  ctx.lineWidth = 1.5;
+  for (let i = -1; i <= 1; i += 2) {
+    ctx.beginPath();
+    ctx.moveTo(effect.x - sin * effect.width * i, effect.y + cos * effect.width * i);
+    ctx.lineTo(endX - sin * effect.width * i, endY + cos * effect.width * i);
+    ctx.stroke();
+  }
   ctx.lineCap = "butt";
 }
 
 function drawShockEffect(effect, progress, alpha) {
   const radius = effect.radius * (0.24 + progress * 0.86);
-  ctx.fillStyle = `rgba(184, 240, 106, ${0.08 * alpha})`;
+  ctx.fillStyle = `rgba(184, 240, 106, ${(effect.ultimate ? 0.13 : 0.08) * alpha})`;
   ctx.strokeStyle = `rgba(232, 255, 178, ${0.86 * alpha})`;
-  ctx.lineWidth = 5;
+  ctx.lineWidth = effect.ultimate ? 7 : 5;
   ctx.beginPath();
   ctx.arc(effect.x, effect.y, radius, 0, Math.PI * 2);
   ctx.fill();
@@ -4775,6 +5198,13 @@ function drawShockEffect(effect, progress, alpha) {
   ctx.beginPath();
   ctx.arc(effect.x, effect.y, Math.max(8, radius * 0.62), 0, Math.PI * 2);
   ctx.stroke();
+  if (effect.ultimate) {
+    ctx.strokeStyle = `rgba(245, 255, 233, ${0.48 * alpha})`;
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.arc(effect.x, effect.y, Math.max(10, radius * 0.36), 0, Math.PI * 2);
+    ctx.stroke();
+  }
   for (const id of effect.stunned || []) {
     const enemy = state.enemies.find((item) => item.id === id);
     if (!enemy) continue;
@@ -4784,6 +5214,47 @@ function drawShockEffect(effect, progress, alpha) {
     ctx.arc(enemy.x, enemy.y, enemyRadius(enemy) + 10, 0, Math.PI * 2);
     ctx.stroke();
   }
+}
+
+function drawBurnEffect(effect, progress, alpha) {
+  const radius = effect.radius * (0.96 + Math.sin(progress * Math.PI * 6) * 0.04);
+  ctx.fillStyle = `rgba(255, 116, 62, ${0.13 * alpha})`;
+  ctx.strokeStyle = `rgba(255, 205, 112, ${0.72 * alpha})`;
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.arc(effect.x, effect.y, radius, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.stroke();
+  ctx.strokeStyle = `rgba(255, 130, 70, ${0.48 * alpha})`;
+  ctx.lineWidth = 2;
+  for (let i = 0; i < 5; i += 1) {
+    const angle = progress * Math.PI * 2 + (Math.PI * 2 * i) / 5;
+    ctx.beginPath();
+    ctx.arc(
+      effect.x + Math.cos(angle) * radius * 0.28,
+      effect.y + Math.sin(angle) * radius * 0.28,
+      radius * 0.18,
+      0,
+      Math.PI * 2,
+    );
+    ctx.stroke();
+  }
+}
+
+function drawUltimateEffect(effect, progress, alpha) {
+  const radius = effect.radius * (0.35 + progress * 1.2);
+  ctx.strokeStyle = `rgba(255, 246, 189, ${0.9 * alpha})`;
+  ctx.lineWidth = 4;
+  ctx.beginPath();
+  ctx.arc(effect.x, effect.y, radius, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.strokeStyle = `${effect.color}`;
+  ctx.globalAlpha = 0.48 * alpha;
+  ctx.lineWidth = 9;
+  ctx.beginPath();
+  ctx.arc(effect.x, effect.y, radius * 0.72, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.globalAlpha = 1;
 }
 
 function drawParticles() {
@@ -5271,6 +5742,7 @@ function renderTowerCodexSummary() {
       def.rayLength ? `射线 ${Math.round(def.rayLength)}` : "",
       def.stunChance ? `眩晕 ${Math.round(def.stunChance * 100)}%` : "",
       def.aura ? auraSummary(1) : "",
+      `终极 ${ultimateDef(type).name}`,
     ].filter(Boolean);
     return `
       <article class="codex-card">
@@ -5286,6 +5758,7 @@ function renderTowerCodexSummary() {
         </div>
         <p>${def.text}</p>
         <p class="codex-note">${guide.upgrade}</p>
+        <p class="codex-note">无尽终极：${ultimateSummary(type)}</p>
         <p>${guide.tactic}</p>
       </article>
     `;
@@ -5313,6 +5786,7 @@ function renderTowerLevelCodex(type) {
         ${renderTowerLevelTable(type)}
       </div>
       <p class="codex-note">${guide.upgrade}</p>
+      <p class="codex-note">无尽终极：${ultimateSummary(type)}</p>
       <p>${guide.tactic}</p>
     </article>
   `;
@@ -5335,6 +5809,18 @@ function renderTowerLevelTable(type) {
       </tr>
     `;
   }).join("");
+  const ultimateTower = { type, level: 3, ultimate: true };
+  const ultimateRow = `
+    <tr class="ultimate-row">
+      <td>终改</td>
+      <td>终极 ¥${ultimateCost(ultimateTower)}</td>
+      <td>${Math.round(towerRange(ultimateTower))}</td>
+      <td>${Math.round(towerVisionRange(ultimateTower))}</td>
+      <td>${formatCodexNumber(towerDamage(ultimateTower), 1)}</td>
+      <td>${formatCodexNumber(towerFireRate(ultimateTower), 2)}/秒</td>
+      <td>${towerLevelSpecialSummary(ultimateTower)} / ${ultimateDef(type).name}</td>
+    </tr>
+  `;
   return `
     <table class="codex-table">
       <thead>
@@ -5348,7 +5834,7 @@ function renderTowerLevelTable(type) {
           <th>特殊数据</th>
         </tr>
       </thead>
-      <tbody>${rows}</tbody>
+      <tbody>${rows}${ultimateRow}</tbody>
     </table>
   `;
 }
@@ -5373,6 +5859,7 @@ function renderAuraCodexDetail() {
         ${renderAuraBuffMatrix()}
       </div>
       <p class="codex-note">光环只影响范围内的非光环塔；同一座塔被多个光环覆盖时，取当前最强的一组加成。</p>
+      <p class="codex-note">无尽终极：${ultimateSummary("aura")}</p>
       <p>${guide.tactic}</p>
     </article>
   `;
@@ -5391,6 +5878,16 @@ function renderAuraLevelTable() {
       </tr>
     `;
   }).join("");
+  const ultimateTower = { type: "aura", level: 3, ultimate: true };
+  const ultimateRow = `
+    <tr class="ultimate-row">
+      <td>终改</td>
+      <td>终极 ¥${ultimateCost(ultimateTower)}</td>
+      <td>${Math.round(baseTowerRange(ultimateTower))}</td>
+      <td>全局主增益</td>
+      <td>射程/伤害/频率</td>
+    </tr>
+  `;
   return `
     <table class="codex-table">
       <thead>
@@ -5402,7 +5899,7 @@ function renderAuraLevelTable() {
           <th>附加增益</th>
         </tr>
       </thead>
-      <tbody>${rows}</tbody>
+      <tbody>${rows}${ultimateRow}</tbody>
     </table>
   `;
 }
@@ -5414,10 +5911,11 @@ function renderAuraBuffMatrix() {
       return `
         <tr>
           <td>${def.name}</td>
-          <td>${formatAuraBoostForCodex(type, 1)}</td>
-          <td>${formatAuraBoostForCodex(type, 2)}</td>
-          <td>${formatAuraBoostForCodex(type, 3)}</td>
-        </tr>
+	          <td>${formatAuraBoostForCodex(type, 1)}</td>
+	          <td>${formatAuraBoostForCodex(type, 2)}</td>
+	          <td>${formatAuraBoostForCodex(type, 3)}</td>
+	          <td>${formatAuraBoostForCodex(type, 3, true)}</td>
+	        </tr>
       `;
     })
     .join("");
@@ -5426,18 +5924,19 @@ function renderAuraBuffMatrix() {
       <thead>
         <tr>
           <th>受益塔</th>
-          <th>光环1级</th>
-          <th>光环2级</th>
-          <th>光环3级</th>
-        </tr>
+	          <th>光环1级</th>
+	          <th>光环2级</th>
+	          <th>光环3级</th>
+	          <th>终极中枢</th>
+	        </tr>
       </thead>
       <tbody>${rows}</tbody>
     </table>
   `;
 }
 
-function formatAuraBoostForCodex(towerType, auraLevel) {
-  const boost = auraBuffFor(towerType, auraLevel);
+function formatAuraBoostForCodex(towerType, auraLevel, ultimate = false) {
+  const boost = auraBuffFor(towerType, auraLevel, ultimate);
   const labels = {
     range: "射程",
     damage: "伤害",
@@ -5451,7 +5950,7 @@ function formatAuraBoostForCodex(towerType, auraLevel) {
     laser: ["damage", "range"],
     shock: ["fireRate", "range"],
   };
-  return (orderByTower[towerType] || ["range", "damage", "fireRate"])
+  return (ultimate ? ["range", "damage", "fireRate"] : orderByTower[towerType] || ["range", "damage", "fireRate"])
     .filter((stat) => boost[stat] > 1)
     .map((stat) => `${labels[stat]}+${Math.round((boost[stat] - 1) * 100)}%`)
     .join(" / ");
@@ -5473,6 +5972,14 @@ function towerLevelSpecialSummary(tower) {
   if (def.rayLength) parts.push(`射线 ${Math.round(towerRayLength(tower))}`);
   if (def.beamWidth) parts.push(`光束 ${Math.round(towerBeamWidth(tower))}`);
   if (def.stunChance) parts.push(`眩晕 ${Math.round(towerStunChance(tower) * 100)}% / ${formatCodexNumber(towerStunTime(tower), 1)}秒`);
+  if (towerHasUltimate(tower)) {
+    if (tower.type === "gun") parts.push("同目标叠伤，最高+60%");
+    if (tower.type === "cannon") parts.push("灼烧区 2.4秒");
+    if (tower.type === "ice") parts.push(`冻结 ${formatCodexNumber(ULTIMATE_TRANSFORMS.ice.freezeTime, 2)}秒`);
+    if (tower.type === "pierce") parts.push(`轨道宽度 ${ULTIMATE_TRANSFORMS.pierce.beamWidth}`);
+    if (tower.type === "laser") parts.push(`折射 ${ULTIMATE_TRANSFORMS.laser.branches} 条`);
+    if (tower.type === "shock") parts.push("内圈余震");
+  }
   return parts.length ? parts.join(" / ") : "持续单体";
 }
 
@@ -5535,25 +6042,41 @@ function renderQuickMenu() {
   const cost = upgradeCost(tower);
   const maxCost = towerUpgradeCostToLevel(tower, 3);
   const upgrading = towerIsUpgrading(tower);
+  const ultimate = ultimateDef(tower);
+  const ultimateBuildable = isEndlessMode() && tower.level >= 3 && !tower.ultimate && !upgrading;
+  const ultimatePrice = ultimateCost(tower);
   const canUpgrade = tower.level < 3 && state.money >= cost && !upgrading;
   const canUpgradeMax = tower.level < 3 && state.money >= maxCost && !upgrading;
+  const canUltimate = ultimateBuildable && state.money >= ultimatePrice;
   const upgradeText = upgrading
-    ? `${tower.upgradeAutoQueued ? "升满中" : "升级中"} ${tower.upgradeTimer.toFixed(1)}s`
+    ? tower.ultimateTimer > 0
+      ? `终改中 ${tower.ultimateTimer.toFixed(1)}s`
+      : `${tower.upgradeAutoQueued ? "升满中" : "升级中"} ${tower.upgradeTimer.toFixed(1)}s`
     : tower.level >= 3
       ? "已满级"
       : `升级 ¥${cost}`;
   const maxUpgradeText = tower.level >= 3 ? "已满级" : `一键升满 ¥${maxCost}`;
+  const ultimateText = !isEndlessMode()
+    ? "终极：无尽限定"
+    : tower.ultimate
+      ? ultimate.name
+      : tower.ultimateTimer > 0
+        ? `终改中 ${tower.ultimateTimer.toFixed(1)}s`
+        : tower.level < 3
+          ? "终极：Lv.3解锁"
+          : `终极改造 ¥${ultimatePrice}`;
   const refund = towerSellValue(tower);
   const laserButton = tower.type === "laser"
     ? `<button id="quickLaserLockButton">${tower.laserLocked ? "解除锁定" : "锁定朝向"}</button>`
     : "";
-  const keyValue = `${tower.id}:${tower.level}:${state.money}:${maxCost}:${state.quickMenu.x}:${state.quickMenu.y}:${tower.upgradeTimer?.toFixed(1)}:${tower.upgradeAutoQueued}:${tower.laserLocked}`;
+  const keyValue = `${tower.id}:${tower.level}:${state.money}:${maxCost}:${ultimatePrice}:${state.gameMode}:${state.quickMenu.x}:${state.quickMenu.y}:${tower.upgradeTimer?.toFixed(1)}:${tower.ultimateTimer?.toFixed(1)}:${tower.upgradeAutoQueued}:${tower.ultimate}:${tower.laserLocked}`;
 
   if (uiCache.quickMenu !== keyValue) {
     ui.quickMenu.innerHTML = `
       <div class="quick-menu-title">${def.name} Lv.${tower.level}</div>
       <button id="quickUpgradeButton" ${canUpgrade ? "" : "disabled"}>${upgradeText}</button>
       <button id="quickMaxUpgradeButton" ${canUpgradeMax ? "" : "disabled"}>${maxUpgradeText}</button>
+      <button id="quickUltimateButton" class="ultimate-action" ${canUltimate ? "" : "disabled"}>${ultimateText}</button>
       ${laserButton}
       <button id="quickSellButton">出售 ¥${refund}</button>
     `;
@@ -5569,6 +6092,10 @@ function renderQuickMenu() {
       upgradeTowerToMax();
       renderQuickMenu();
     });
+    document.querySelector("#quickUltimateButton")?.addEventListener("click", () => {
+      transformTowerUltimate();
+      renderQuickMenu();
+    });
     document.querySelector("#quickLaserLockButton")?.addEventListener("click", () => {
       if (tower.laserLocked) unlockLaserTower(tower);
       else startLaserAim(tower);
@@ -5582,7 +6109,7 @@ function openTowerQuickMenu(tower, event) {
   state.selectedTowerId = tower.id;
   state.quickMenu.towerId = tower.id;
   state.quickMenu.x = clamp(event.clientX, 8, window.innerWidth - 178);
-  state.quickMenu.y = clamp(event.clientY, 8, window.innerHeight - (tower.type === "laser" ? 198 : 156));
+  state.quickMenu.y = clamp(event.clientY, 8, window.innerHeight - (tower.type === "laser" ? 238 : 196));
   uiCache.quickMenu = "";
   renderQuickMenu();
 }
@@ -5626,13 +6153,27 @@ function auraSummary(level) {
   return level >= 3 ? `主增益+${primary}% / 附加+10%` : `主增益+${primary}%`;
 }
 
+function ultimateSummary(type) {
+  const ultimate = ultimateDef(type);
+  return ultimate ? `${ultimate.name}：${ultimate.text}` : "";
+}
+
+function ultimateUnlockText(tower) {
+  if (!isEndlessMode()) return "无尽模式限定";
+  if (tower.ultimate) return ultimateDef(tower).name;
+  if (tower.ultimateTimer > 0) return `改造中 ${tower.ultimateTimer.toFixed(1)}s`;
+  if (tower.level < 3) return "Lv.3 解锁";
+  return `¥${ultimateCost(tower)} / ${ultimateDef(tower).duration}s`;
+}
+
 function selectedTowerSpecialLines(tower) {
   const def = TOWER_TYPES[tower.type];
   if (def.aura) {
     const nextAura =
       tower.level >= 3 ? "满级" : `${auraSummary(tower.level + 1)}`;
+    const current = tower.ultimate ? "终极中枢：射程/伤害/频率全增益" : auraSummary(tower.level);
     return `
-      <span>当前增益 <strong>${auraSummary(tower.level)}</strong></span>
+      <span>当前增益 <strong>${current}</strong></span>
       <span>下级增益 <strong>${nextAura}</strong></span>
     `;
   }
@@ -5658,7 +6199,8 @@ function selectedTowerSpecialLines(tower) {
       }</strong></span>
     `;
   }
-  return `<span>视野 <strong>${Math.round(towerVisionRange(tower))}</strong></span>`;
+  const focus = tower.type === "gun" && tower.ultimate ? `<span>锁定叠伤 <strong>${Math.round(((tower.focusStacks || 0) * 7.5))}%</strong></span>` : "";
+  return `<span>视野 <strong>${Math.round(towerVisionRange(tower))}</strong></span>${focus}`;
 }
 
 function renderAuraTargetList(aura) {
@@ -5686,12 +6228,14 @@ function renderAuraTargetList(aura) {
 function renderSelectedCard() {
   const tower = selectedTower();
   if (tower) {
-	    const def = TOWER_TYPES[tower.type];
-	    const cost = upgradeCost(tower);
-	    const maxCost = towerUpgradeCostToLevel(tower, 3);
-	    const upgrading = towerIsUpgrading(tower);
-    const range = Math.round(towerRange(tower));
-    const rangeLabel = def.aura ? "光环" : def.laser ? "索敌" : "射程";
+		    const def = TOWER_TYPES[tower.type];
+		    const cost = upgradeCost(tower);
+		    const maxCost = towerUpgradeCostToLevel(tower, 3);
+		    const ultimatePrice = ultimateCost(tower);
+		    const upgrading = towerIsUpgrading(tower);
+		    const ultimate = ultimateDef(tower);
+	    const range = Math.round(towerRange(tower));
+	    const rangeLabel = def.aura ? "光环" : def.laser ? "索敌" : "射程";
     const boost = towerBoost(tower);
     const specialLines = selectedTowerSpecialLines(tower);
     const damage = Math.round(towerDamage(tower));
@@ -5716,14 +6260,30 @@ function renderSelectedCard() {
     const laserAction = tower.type === "laser"
       ? `<button id="laserLockButton">${tower.laserLocked ? "解除锁定" : "锁定朝向"}</button>`
       : "";
-	    const upgradeStatus = upgrading
-	      ? `<span>${tower.upgradeAutoQueued ? "升满中" : "升级中"} <strong>${tower.upgradeTimer.toFixed(1)}s</strong></span>`
-	      : `<span>升级 <strong>${tower.level >= 3 ? "满级" : `¥${cost}`}</strong></span>`;
-	    const maxUpgradeStatus = !upgrading && tower.level < 3
-	      ? `<span>一键升满 <strong>¥${maxCost}</strong></span>`
-	      : "";
-	    const maxUpgradeButtonText = tower.level >= 3 ? "已满级" : "一键升满";
-	    const keyValue = `tower:${tower.id}:${tower.level}:${state.money}:${maxCost}:${boost.range}:${boost.damage}:${boost.fireRate}:${tower.upgradeTimer?.toFixed(1)}:${tower.upgradeAutoQueued}:${tower.laserLocked}:${auraTargets(tower).map((item) => `${item.tower.id}:${item.active}`).join(",")}`;
+		    const upgradeStatus = upgrading
+		      ? tower.ultimateTimer > 0
+		        ? `<span>终极改造 <strong>${tower.ultimateTimer.toFixed(1)}s</strong></span>`
+		        : `<span>${tower.upgradeAutoQueued ? "升满中" : "升级中"} <strong>${tower.upgradeTimer.toFixed(1)}s</strong></span>`
+		      : `<span>升级 <strong>${tower.level >= 3 ? "满级" : `¥${cost}`}</strong></span>`;
+		    const maxUpgradeStatus = !upgrading && tower.level < 3
+		      ? `<span>一键升满 <strong>¥${maxCost}</strong></span>`
+		      : "";
+		    const ultimateStatus = `<span>终极改造 <strong>${ultimateUnlockText(tower)}</strong></span>`;
+		    const ultimateNote = tower.ultimate
+		      ? `<p class="ultimate-note">${ultimateSummary(tower.type)}</p>`
+		      : isEndlessMode()
+		        ? `<p class="ultimate-note">${ultimate.name}：Lv.3 后可投入高额资金改造成终局核心。</p>`
+		        : `<p class="ultimate-note">终极改造只在无尽挑战中开放。</p>`;
+		    const maxUpgradeButtonText = tower.level >= 3 ? "已满级" : "一键升满";
+		    const canUltimate = isEndlessMode() && tower.level >= 3 && !tower.ultimate && !upgrading && state.money >= ultimatePrice;
+		    const ultimateButtonText = tower.ultimate
+		      ? "已终极"
+		      : tower.ultimateTimer > 0
+		        ? "终改中"
+		        : tower.level < 3
+		          ? "Lv.3解锁"
+		          : "终极改造";
+		    const keyValue = `tower:${tower.id}:${tower.level}:${state.money}:${maxCost}:${ultimatePrice}:${state.gameMode}:${boost.range}:${boost.damage}:${boost.fireRate}:${tower.upgradeTimer?.toFixed(1)}:${tower.ultimateTimer?.toFixed(1)}:${tower.upgradeAutoQueued}:${tower.ultimate}:${tower.laserLocked}:${tower.focusStacks || 0}:${auraTargets(tower).map((item) => `${item.tower.id}:${item.active}`).join(",")}`;
     const html = `
       <h2>已选炮塔</h2>
       <p><span class="tower-name">${def.name}</span>，等级 ${tower.level}。${def.text}</p>
@@ -5731,25 +6291,29 @@ function renderSelectedCard() {
         <span>${rangeLabel} <strong>${range}</strong></span>
         <span>下级${rangeLabel} <strong>${nextRange}</strong></span>
         ${combatLines}
-        ${specialLines}
-	        ${boostLine}
-	        ${terrainLine}
-	        ${upgradeStatus}
-	        ${maxUpgradeStatus}
-	      </div>
-	      <div class="tower-actions">
-	        <button id="upgradeTowerButton"${tower.level >= 3 || upgrading ? " disabled" : ""}>升级</button>
-	        <button id="upgradeMaxTowerButton"${tower.level >= 3 || upgrading || state.money < maxCost ? " disabled" : ""}>${maxUpgradeButtonText}</button>
-	        ${laserAction}
-	        <button id="sellTowerButton">出售</button>
+	        ${specialLines}
+		        ${boostLine}
+		        ${terrainLine}
+		        ${upgradeStatus}
+		        ${maxUpgradeStatus}
+		        ${ultimateStatus}
+		      </div>
+		      ${ultimateNote}
+		      <div class="tower-actions">
+		        <button id="upgradeTowerButton"${tower.level >= 3 || upgrading ? " disabled" : ""}>升级</button>
+		        <button id="upgradeMaxTowerButton"${tower.level >= 3 || upgrading || state.money < maxCost ? " disabled" : ""}>${maxUpgradeButtonText}</button>
+		        <button id="ultimateTowerButton" class="ultimate-action"${canUltimate ? "" : " disabled"}>${ultimateButtonText}</button>
+		        ${laserAction}
+		        <button id="sellTowerButton">出售</button>
       </div>
       ${auraList}
     `;
     if (uiCache.selected !== keyValue) {
 	      ui.selected.innerHTML = html;
-	      uiCache.selected = keyValue;
-	      document.querySelector("#upgradeTowerButton")?.addEventListener("click", upgradeTower);
-	      document.querySelector("#upgradeMaxTowerButton")?.addEventListener("click", upgradeTowerToMax);
+		      uiCache.selected = keyValue;
+		      document.querySelector("#upgradeTowerButton")?.addEventListener("click", upgradeTower);
+		      document.querySelector("#upgradeMaxTowerButton")?.addEventListener("click", upgradeTowerToMax);
+		      document.querySelector("#ultimateTowerButton")?.addEventListener("click", transformTowerUltimate);
       document.querySelector("#laserLockButton")?.addEventListener("click", () => {
         if (tower.laserLocked) unlockLaserTower(tower);
         else startLaserAim(tower);
@@ -5777,15 +6341,18 @@ function renderSelectedCard() {
         ? "升级会提升范围、伤害和眩晕能力。"
         : "升级会提升射程和火力。";
   const keyValue = `build:${state.selectedTowerType}`;
+  const ultimate = ultimateDef(state.selectedTowerType);
   const html = `
     <h2>当前选择</h2>
     <p><span class="tower-name">${def.name}</span>：${def.text} ${growthText}</p>
     <div class="tower-stats">
       <span>价格 <strong>¥${def.cost}</strong></span>
       <span>${rangeLabel} <strong>${Math.round(def.range)}</strong></span>
+      <span>无尽终极 <strong>${ultimate.name}</strong></span>
       ${buildCombatLines}
       ${buildSpecialLines}
     </div>
+    <p class="ultimate-note">${ultimate.text}</p>
   `;
   if (uiCache.selected !== keyValue) {
     ui.selected.innerHTML = html;
