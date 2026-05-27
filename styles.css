@@ -307,6 +307,14 @@ h1 {
   color: #f5ffe9;
 }
 
+.ultimate-note {
+  border: 1px solid rgba(255, 221, 128, 0.28);
+  background: rgba(54, 41, 15, 0.36);
+  color: #ffe8a8 !important;
+  border-radius: 7px;
+  padding: 8px 9px;
+}
+
 .tower-actions {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(86px, 1fr));
@@ -323,6 +331,19 @@ h1 {
 
 .tower-actions button:hover {
   border-color: var(--yellow);
+}
+
+.tower-actions .ultimate-action,
+.quick-menu .ultimate-action {
+  border-color: rgba(255, 221, 128, 0.55);
+  background: #2c2515;
+  color: #ffe8a8;
+  font-weight: 800;
+}
+
+.tower-actions .ultimate-action:hover,
+.quick-menu .ultimate-action:hover {
+  border-color: #fff0a6;
 }
 
 .board-panel {
@@ -1121,6 +1142,11 @@ body.is-level-select .app-shell {
   border-bottom: 0;
 }
 
+.codex-table .ultimate-row td {
+  background: rgba(54, 41, 15, 0.42);
+  color: #ffe8a8;
+}
+
 .codex-table td:first-child,
 .codex-table th:first-child {
   color: #eafff6;
@@ -1129,7 +1155,7 @@ body.is-level-select .app-shell {
 }
 
 .aura-matrix {
-  min-width: 760px;
+  min-width: 920px;
 }
 
 .aura-target-list {
